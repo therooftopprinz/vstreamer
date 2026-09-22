@@ -1,0 +1,12 @@
+# Google C++ style with Allman braces (opening brace on its own line).
+BasedOnStyle: Google
+BreakBeforeBraces: Allman
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+# Keep short braced blocks from collapsing onto one line (Allman-friendly).
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false

@@ -1,0 +1,27 @@
+# clangd project config — formatting comes from .clang-format (Google + Allman).
+CompileFlags:
+  Add:
+    - -Wall
+    - -Wextra
+    - -std=c++17
+
+Diagnostics:
+  ClangTidy:
+    Add:
+      - readability-*
+      - modernize-*
+      - bugprone-*
+      - performance-*
+      - clang-analyzer-*
+    Remove:
+      - modernize-use-trailing-return-type
+      - readability-identifier-length
+      - readability-magic-numbers
+
+Hover:
+  ShowAKA: Yes
+
+InlayHints:
+  Enabled: Yes
+  ParameterNames: Yes
+  DeducedTypes: Yes
