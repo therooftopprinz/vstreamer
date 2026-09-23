@@ -41,8 +41,8 @@ public:
     int  open() override;
     void close() override;
 
-    int input(uint8_t port, const frame &in) override;
-    int output(uint8_t port, frame &out, int timeout_ms) override;
+    int input(uint8_t port, const data_packet &in) override;
+    int output(uint8_t port, data_packet &out, int timeout_ms) override;
 
     int configure(uint64_t key, int64_t value) override;
     int query(uint64_t key, int64_t *value) const override;
@@ -53,7 +53,7 @@ public:
 private:
     static constexpr int k_max_workers = 8;
     static constexpr int k_queue_depth = 32;
-    static constexpr size_t k_max_jpeg = 2ULL * 1024ULL * 1024ULL;
+    static constexpr size_t k_max_jpeg = 8ULL * 1024ULL * 1024ULL;
 
     struct job
     {
@@ -61,6 +61,7 @@ private:
         uint8_t *data = nullptr;
         size_t   size = 0;
         int64_t  pts = 0;
+        int64_t  capture_mono_ns = 0;
     };
 
     struct result_slot
@@ -81,6 +82,7 @@ private:
     int                height = 720;
     int                fps = 30;
     int                workers = 2;
+    int                worker_cpu = -1;
     output_mode_e      output_mode = output_mode_e::filter;
     media_kind_e       output_format = media_kind_e::NV12;
 

@@ -1,5 +1,7 @@
 #include "components/v4l2_source.hpp"
 
+#include "core/time_util.hpp"
+
 #include "core/key_util.hpp"
 
 #include <cctype>
@@ -567,14 +569,18 @@ int v4l2_source::open()
         return 0;
     }
 
-    /* Keep noise size at rover snow defaults; pace with capture fps. */
+    /* Noise fallback matches requested capture geometry (not hard-coded rover size). */
     {
-        char         fps_buf[32];
+        char size_buf[32];
+        std::snprintf(size_buf, sizeof(size_buf), "%dx%d", width, height);
+        std::string_view size_sv = size_buf;
+        noise.configure("size", &size_sv);
+        char fps_buf[32];
         key_format_i64(fps, fps_buf, sizeof(fps_buf));
         std::string_view fps_sv = fps_buf;
         noise.configure("fps", &fps_sv);
-        std::string_view size_sv = "416x240";
-        noise.configure("size", &size_sv);
+        std::string_view fmt_sv = "mjpeg";
+        noise.configure("format", &fmt_sv);
     }
 
     int r = capture_open_locked(true);
@@ -587,8 +593,9 @@ int v4l2_source::open()
         }
         noise_active = true;
         cap_retry_due = now_sec() + 1.0;
-        std::fprintf(stderr, "v4l2_source: capture unavailable; streaming noise 416x240@%d\n",
-                     fps);
+        std::fprintf(stderr,
+                     "v4l2_source: capture unavailable on %s; MJPEG noise fallback %dx%d@%d\n",
+                     device.c_str(), width, height, fps);
     }
     source_open = true;
     return 0;
@@ -700,8 +707,9 @@ int v4l2_source::fetch_live_locked(frame &out, int timeout_ms)
         else
         {
             std::memcpy(tmp, src, size);
+            const int64_t cap_ns = steady_mono_ns();
             out.reset(media_kind_e::MJPEG, live_w, live_h, pts++, true, tmp, size,
-                      [](uint8_t *p) { std::free(p); });
+                      [](uint8_t *p) { std::free(p); }, cap_ns);
             ret = 0;
         }
     }
@@ -714,7 +722,7 @@ int v4l2_source::fetch_live_locked(frame &out, int timeout_ms)
     return ret;
 }
 
-int v4l2_source::output(uint8_t port, frame &out, int timeout_ms)
+int v4l2_source::output(uint8_t port, data_packet &out, int timeout_ms)
 {
     std::unique_lock<std::mutex> lock(mu);
     if (!source_open)
@@ -729,9 +737,11 @@ int v4l2_source::output(uint8_t port, frame &out, int timeout_ms)
 
     if (capture_open)
     {
-        int r = fetch_live_locked(out, timeout_ms);
+        frame fr;
+        int   r = fetch_live_locked(fr, timeout_ms);
         if (r == 0)
         {
+            out.adopt_frame(std::move(fr));
             return 0;
         }
         if (capture_open)
@@ -749,8 +759,9 @@ int v4l2_source::output(uint8_t port, frame &out, int timeout_ms)
             return nr;
         }
         noise_active = true;
-        std::fprintf(stderr, "v4l2_source: capture unavailable; streaming noise 416x240@%d\n",
-                     fps);
+        std::fprintf(stderr,
+                     "v4l2_source: capture unavailable on %s; MJPEG noise fallback %dx%d@%d\n",
+                     device.c_str(), width, height, fps);
     }
     /* Drop lock so console configure/query is not blocked by fps pacing. */
     lock.unlock();
@@ -902,6 +913,58 @@ int v4l2_source::query(std::string_view key, std::string_view *value) const
         {
             return -EINVAL;
         }
+        query_buf = buf;
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "media_type")
+    {
+        if (capture_open)
+        {
+            query_buf = "mjpeg";
+        }
+        else if (noise_active)
+        {
+            return noise.query(std::string_view("media_type"), value);
+        }
+        else
+        {
+            query_buf = "mjpeg";
+        }
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "pixel_type")
+    {
+        if (capture_open)
+        {
+            query_buf = "mjpeg";
+        }
+        else if (noise_active)
+        {
+            return noise.query(std::string_view("pixel_type"), value);
+        }
+        else
+        {
+            query_buf = "mjpeg";
+        }
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "width")
+    {
+        const int w = capture_open && live_w > 0 ? live_w : width;
+        char      buf[16];
+        std::snprintf(buf, sizeof(buf), "%d", w);
+        query_buf = buf;
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "height")
+    {
+        const int h = capture_open && live_h > 0 ? live_h : height;
+        char      buf[16];
+        std::snprintf(buf, sizeof(buf), "%d", h);
         query_buf = buf;
         *value = query_buf;
         return 0;

@@ -207,4 +207,47 @@ int pack_yuv422p_to_nv12(const uint8_t *y, int y_stride, const uint8_t *u, int u
     return 0;
 }
 
+int copy_nv12_planes_to_packed(const uint8_t *y_plane, int y_stride, const uint8_t *uv_plane,
+                               int uv_stride, int src_w, int src_h, bool swap_chroma, uint8_t *dst,
+                               int dst_w, int dst_h)
+{
+    int w = src_w < dst_w ? src_w : dst_w;
+    int h = src_h < dst_h ? src_h : dst_h;
+    w &= ~1;
+    h &= ~1;
+    if (w < 2 || h < 2 || nullptr == y_plane || nullptr == uv_plane || nullptr == dst ||
+        y_stride < w || uv_stride < w)
+    {
+        return -EINVAL;
+    }
+
+    uint8_t *dy = dst;
+    uint8_t *duv = dst + static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h);
+
+    for (int row = 0; row < h; row++)
+    {
+        std::memcpy(dy + static_cast<size_t>(row) * static_cast<size_t>(dst_w),
+                    y_plane + static_cast<size_t>(row) * static_cast<size_t>(y_stride),
+                    static_cast<size_t>(w));
+    }
+    for (int row = 0; row < h / 2; row++)
+    {
+        const uint8_t *src = uv_plane + static_cast<size_t>(row) * static_cast<size_t>(uv_stride);
+        uint8_t       *out = duv + static_cast<size_t>(row) * static_cast<size_t>(dst_w);
+        if (!swap_chroma)
+        {
+            std::memcpy(out, src, static_cast<size_t>(w));
+            continue;
+        }
+        for (int x = 0; x < w; x += 2)
+        {
+            out[x] = src[x + 1];
+            out[x + 1] = src[x];
+        }
+    }
+
+    pad_nv12_tail(dy, duv, dst_w, dst_h, h);
+    return 0;
+}
+
 }  // namespace vstreamer

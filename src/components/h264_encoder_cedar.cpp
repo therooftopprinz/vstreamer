@@ -282,8 +282,14 @@ void h264_encoder_cedar::close()
     cv.notify_all();
 }
 
-int h264_encoder_cedar::input(uint8_t /*port*/, const frame &in)
+int h264_encoder_cedar::input(uint8_t /*port*/, const data_packet &in)
 {
+    const frame_data &f = data_packet::cast<frame_data>(in);
+    if (f.kind != media_kind_e::NV12)
+    {
+        return -EINVAL;
+    }
+
     std::lock_guard<std::mutex> lock(mu);
     if (!opened)
     {
@@ -296,16 +302,12 @@ int h264_encoder_cedar::input(uint8_t /*port*/, const frame &in)
         return r;
     }
 
-    if (in.kind() != media_kind_e::NV12)
-    {
-        return -EINVAL;
-    }
-    if (in.width() != live_w || in.height() != live_h)
+    if (f.width != live_w || f.height != live_h)
     {
         return -EINVAL;
     }
     int want = nv12_size_locked();
-    if (want < 0 || static_cast<size_t>(want) != in.size() || nullptr == in.data())
+    if (want < 0 || static_cast<size_t>(want) != f.buf.size || nullptr == f.buf.data)
     {
         return -EINVAL;
     }
@@ -314,8 +316,8 @@ int h264_encoder_cedar::input(uint8_t /*port*/, const frame &in)
     auto *frame = static_cast<AVFrame *>(this->avframe);
 
     av_frame_unref(frame);
-    int sz = av_image_fill_arrays(frame->data, frame->linesize, in.data(), AV_PIX_FMT_NV12, live_w,
-                                  live_h, 1);
+    int sz = av_image_fill_arrays(frame->data, frame->linesize, f.buf.data, AV_PIX_FMT_NV12,
+                                  live_w, live_h, 1);
     if (sz < 0)
     {
         return sz;
@@ -323,8 +325,9 @@ int h264_encoder_cedar::input(uint8_t /*port*/, const frame &in)
     frame->width = live_w;
     frame->height = live_h;
     frame->format = AV_PIX_FMT_NV12;
-    frame->pts = in.pts();
-    frame->buf[0] = av_buffer_create(in.data(), static_cast<size_t>(sz), nv12_keep, nullptr, 0);
+    frame->pts = f.pts;
+    frame->buf[0] =
+        av_buffer_create(f.buf.data, static_cast<size_t>(sz), nv12_keep, nullptr, 0);
     if (nullptr == frame->buf[0])
     {
         av_frame_unref(frame);
@@ -343,7 +346,7 @@ int h264_encoder_cedar::input(uint8_t /*port*/, const frame &in)
     return r;
 }
 
-int h264_encoder_cedar::output(uint8_t /*port*/, frame &out, int timeout_ms)
+int h264_encoder_cedar::output(uint8_t /*port*/, data_packet &out, int timeout_ms)
 {
     std::unique_lock<std::mutex> lock(mu);
     if (!opened && out_q.empty())
@@ -374,7 +377,7 @@ int h264_encoder_cedar::output(uint8_t /*port*/, frame &out, int timeout_ms)
         return opened ? -EAGAIN : -EBADF;
     }
 
-    out = std::move(out_q.front());
+    out.adopt_frame(std::move(out_q.front()));
     out_q.pop_front();
     return 0;
 }

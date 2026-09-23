@@ -33,7 +33,7 @@ public:
     int  open() override;
     void close() override;
 
-    int input(uint8_t port, const frame &in) override;
+    int input(uint8_t port, const data_packet &in) override;
 
     int configure(uint64_t key, int64_t value) override;
     int query(uint64_t key, int64_t *value) const override;
@@ -45,7 +45,7 @@ private:
     void stop_locked();
     int  start_locked(int w, int h);
     int  ensure_session_locked(int w, int h);
-    int  write_frame_locked(const frame &in);
+    int  write_frame_locked(const data_packet &in);
 
     mutable std::mutex mu;
 

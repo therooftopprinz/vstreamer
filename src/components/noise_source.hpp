@@ -16,7 +16,7 @@
 namespace vstreamer
 {
 
-/* Synthetic MJPEG snow (rover camera noise path). Default 416x240. */
+/* Synthetic MJPEG or NV12 snow (rover camera noise path). Default 416x240 MJPEG. */
 class noise_source : public component_source
 {
 public:
@@ -32,7 +32,7 @@ public:
     int  open() override;
     void close() override;
 
-    int output(uint8_t port, frame &out, int timeout_ms) override;
+    int output(uint8_t port, data_packet &out, int timeout_ms) override;
 
     int configure(uint64_t key, int64_t value) override;
     int query(uint64_t key, int64_t *value) const override;
@@ -43,7 +43,8 @@ public:
 private:
     int  ensure_encoder_locked();
     void free_encoder_locked();
-    int  make_jpeg_locked(uint8_t **out, size_t *out_sz);
+    int  make_jpeg_locked(int64_t frame_pts, uint8_t **out, size_t *out_sz);
+    int  make_nv12_locked(uint8_t **out, size_t *out_sz);
     void pace_locked(int timeout_ms);
 
     mutable std::mutex mu;
@@ -52,6 +53,7 @@ private:
     int width = 416;
     int height = 240;
     int fps = 30;
+    bool output_nv12 = false;
 
     int64_t pts = 0;
     double  due_sec = 0;

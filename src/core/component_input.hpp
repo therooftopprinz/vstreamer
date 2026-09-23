@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-#include "core/frame.hpp"
+#include "core/data_packet.hpp"
 
 namespace vstreamer
 {
@@ -13,7 +13,7 @@ class component_input
 public:
     virtual ~component_input() = default;
 
-    virtual int input(uint8_t port, const frame &in) = 0;
+    virtual int input(uint8_t port, const data_packet &in) = 0;
 };
 
 }  // namespace vstreamer

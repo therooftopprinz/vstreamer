@@ -24,6 +24,11 @@ int pack_yuv422p_to_nv12(const uint8_t *y, int y_stride, const uint8_t *u, int u
                          const uint8_t *v, int v_stride, int src_w, int src_h, uint8_t *dst,
                          int dst_w, int dst_h);
 
+/* Separate Y + interleaved chroma (NV12/NV21) → packed NV12. swap_chroma: NV21 → NV12. */
+int copy_nv12_planes_to_packed(const uint8_t *y_plane, int y_stride, const uint8_t *uv_plane,
+                               int uv_stride, int src_w, int src_h, bool swap_chroma, uint8_t *dst,
+                               int dst_w, int dst_h);
+
 }  // namespace vstreamer
 
 #endif  // VSTREAMER_CORE_PIX_CONVERT_HPP

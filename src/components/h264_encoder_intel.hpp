@@ -36,8 +36,8 @@ public:
     int  open() override;
     void close() override;
 
-    int input(uint8_t port, const frame &in) override;
-    int output(uint8_t port, frame &out, int timeout_ms) override;
+    int input(uint8_t port, const data_packet &in) override;
+    int output(uint8_t port, data_packet &out, int timeout_ms) override;
 
     int configure(uint64_t key, int64_t value) override;
     int query(uint64_t key, int64_t *value) const override;

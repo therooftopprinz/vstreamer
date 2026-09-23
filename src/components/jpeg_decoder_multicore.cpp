@@ -3,15 +3,19 @@
 #include "core/key_util.hpp"
 #include "core/output_opts.hpp"
 #include "core/pix_convert.hpp"
+#include "core/thread_affinity.hpp"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 
 extern "C"
 {
 #include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 }
 
@@ -59,6 +63,16 @@ int parse_size(std::string_view s, int *w, int *h)
     return 0;
 }
 
+void log_unsupported_pix_fmt_once(int fmt)
+{
+    static std::atomic<bool> logged {false};
+    if (!logged.exchange(true))
+    {
+        std::fprintf(stderr, "jpeg_decoder_multicore: unsupported decoded pix_fmt %s (%d)\n",
+                     av_get_pix_fmt_name(static_cast<AVPixelFormat>(fmt)), fmt);
+    }
+}
+
 }  // namespace
 
 jpeg_decoder_multicore::jpeg_decoder_multicore() = default;
@@ -91,15 +105,13 @@ int jpeg_decoder_multicore::decode_one(void *dec_v, void *avframe_v, void *pkt_v
     auto *avf = static_cast<AVFrame *>(avframe_v);
     auto *packet = static_cast<AVPacket *>(pkt_v);
 
-    int            dw = 0;
-    int            dh = 0;
-    output_mode_e  mode = output_mode_e::filter;
-    media_kind_e   fmt = media_kind_e::NV12;
+    int          dw = 0;
+    int          dh = 0;
+    media_kind_e fmt = media_kind_e::NV12;
     {
         std::lock_guard<std::mutex> lock(cfg_mu);
         dw = width;
         dh = height;
-        mode = output_mode;
         fmt = output_format;
     }
     if (fmt != media_kind_e::NV12)
@@ -134,11 +146,6 @@ int jpeg_decoder_multicore::decode_one(void *dec_v, void *avframe_v, void *pkt_v
     {
         case AV_PIX_FMT_YUVJ422P:
         case AV_PIX_FMT_YUV422P:
-            if (mode != output_mode_e::convert)
-            {
-                std::free(buf);
-                return -ENOTSUP;
-            }
             r = pack_yuv422p_to_nv12(avf->data[0], avf->linesize[0], avf->data[1], avf->linesize[1],
                                      avf->data[2], avf->linesize[2], avf->width, avf->height, buf,
                                      dw, dh);
@@ -149,7 +156,18 @@ int jpeg_decoder_multicore::decode_one(void *dec_v, void *avframe_v, void *pkt_v
                                      avf->data[2], avf->linesize[2], avf->width, avf->height, buf,
                                      dw, dh);
             break;
+        case AV_PIX_FMT_NV12:
+            r = copy_nv12_planes_to_packed(avf->data[0], avf->linesize[0], avf->data[1],
+                                           avf->linesize[1], avf->width, avf->height, false, buf,
+                                           dw, dh);
+            break;
+        case AV_PIX_FMT_NV21:
+            r = copy_nv12_planes_to_packed(avf->data[0], avf->linesize[0], avf->data[1],
+                                           avf->linesize[1], avf->width, avf->height, true, buf,
+                                           dw, dh);
+            break;
         default:
+            log_unsupported_pix_fmt_once(avf->format);
             std::free(buf);
             return -ENOTSUP;
     }
@@ -160,12 +178,21 @@ int jpeg_decoder_multicore::decode_one(void *dec_v, void *avframe_v, void *pkt_v
     }
 
     out->reset(media_kind_e::NV12, dw, dh, j.pts, true, buf, nv12_sz,
-               [](uint8_t *p) { std::free(p); });
+               [](uint8_t *p) { std::free(p); }, j.capture_mono_ns);
     return 0;
 }
 
 void jpeg_decoder_multicore::worker_main()
 {
+    {
+        int cpu = -1;
+        {
+            std::lock_guard<std::mutex> lock(cfg_mu);
+            cpu = worker_cpu;
+        }
+        pin_current_thread_to_cpu(cpu);
+    }
+
     const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_MJPEG);
     if (nullptr == codec)
     {
@@ -349,10 +376,10 @@ void jpeg_decoder_multicore::close()
     opened = false;
 }
 
-int jpeg_decoder_multicore::input(uint8_t /*port*/, const frame &in)
+int jpeg_decoder_multicore::input(uint8_t /*port*/, const data_packet &in)
 {
-    if (in.kind() != media_kind_e::MJPEG || nullptr == in.data() || in.size() == 0 ||
-        in.size() > k_max_jpeg)
+    const frame_data &f = data_packet::cast<frame_data>(in);
+    if (f.kind != media_kind_e::MJPEG || f.buf.size > k_max_jpeg)
     {
         return -EINVAL;
     }
@@ -363,12 +390,12 @@ int jpeg_decoder_multicore::input(uint8_t /*port*/, const frame &in)
         return -EBADF;
     }
 
-    auto *copy = static_cast<uint8_t *>(std::malloc(in.size()));
+    auto *copy = static_cast<uint8_t *>(std::malloc(f.buf.size));
     if (nullptr == copy)
     {
         return -ENOMEM;
     }
-    std::memcpy(copy, in.data(), in.size());
+    std::memcpy(copy, f.buf.data, f.buf.size);
 
     std::unique_lock<std::mutex> lock(job_mu);
     if (job_count == k_queue_depth)
@@ -380,15 +407,16 @@ int jpeg_decoder_multicore::input(uint8_t /*port*/, const frame &in)
 
     jobs[job_tail].seq = next_in_seq++;
     jobs[job_tail].data = copy;
-    jobs[job_tail].size = in.size();
-    jobs[job_tail].pts = in.pts();
+    jobs[job_tail].size = f.buf.size;
+    jobs[job_tail].pts = f.pts;
+    jobs[job_tail].capture_mono_ns = f.capture_mono_ns;
     job_tail = (job_tail + 1) % k_queue_depth;
     job_count++;
     job_cv.notify_one();
     return 0;
 }
 
-int jpeg_decoder_multicore::output(uint8_t /*port*/, frame &out, int timeout_ms)
+int jpeg_decoder_multicore::output(uint8_t /*port*/, data_packet &out, int timeout_ms)
 {
     std::unique_lock<std::mutex> life(life_mu);
     if (!opened)
@@ -435,7 +463,7 @@ int jpeg_decoder_multicore::output(uint8_t /*port*/, frame &out, int timeout_ms)
     int status = results[slot].status;
     if (status == 0)
     {
-        out = std::move(results[slot].out);
+        out.adopt_frame(std::move(results[slot].out));
     }
     else
     {
@@ -482,6 +510,24 @@ int jpeg_decoder_multicore::configure(std::string_view key, std::string_view *va
         }
         std::lock_guard<std::mutex> lock(cfg_mu);
         workers = static_cast<int>(n);
+        return 0;
+    }
+    if (key == "worker_cpu")
+    {
+        int64_t     n = 0;
+        std::string tmp(v);
+        int         r = key_parse_i64(tmp.c_str(), &n);
+        if (r < 0 || n < -1 || n > 255)
+        {
+            return -EINVAL;
+        }
+        std::lock_guard<std::mutex> life(life_mu);
+        if (opened)
+        {
+            return -EBUSY;
+        }
+        std::lock_guard<std::mutex> lock(cfg_mu);
+        worker_cpu = static_cast<int>(n);
         return 0;
     }
 

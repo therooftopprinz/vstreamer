@@ -6,7 +6,7 @@ namespace vstreamer
 {
 
 frame::frame()
-    : fields{media_kind_e::UNKNOWN, 0, 0, 0, false, nullptr, 0, {}}
+    : fields{media_kind_e::UNKNOWN, 0, 0, 0, 0, false, nullptr, 0, {}}
 {
 }
 
@@ -20,6 +20,7 @@ frame::frame(frame &&other) noexcept
              other.fields.width,
              other.fields.height,
              other.fields.pts,
+             other.fields.capture_mono_ns,
              other.fields.key,
              other.fields.data,
              other.fields.size,
@@ -37,6 +38,7 @@ frame &frame::operator=(frame &&other) noexcept
         fields.width = other.fields.width;
         fields.height = other.fields.height;
         fields.pts = other.fields.pts;
+        fields.capture_mono_ns = other.fields.capture_mono_ns;
         fields.key = other.fields.key;
         fields.data = other.fields.data;
         fields.size = other.fields.size;
@@ -58,13 +60,15 @@ void frame::release()
 }
 
 void frame::reset(media_kind_e kind, int width, int height, int64_t pts, bool key,
-                  uint8_t *data, size_t size, std::function<void(uint8_t *)> data_deleter)
+                  uint8_t *data, size_t size, std::function<void(uint8_t *)> data_deleter,
+                  int64_t capture_mono_ns)
 {
     release();
     fields.kind = kind;
     fields.width = width;
     fields.height = height;
     fields.pts = pts;
+    fields.capture_mono_ns = capture_mono_ns;
     fields.key = key;
     fields.data = data;
     fields.size = size;

@@ -21,6 +21,8 @@ inline void default_data_deleter(uint8_t *data)
     free(data);
 }
 
+class data_packet;
+
 class frame
 {
 public:
@@ -35,15 +37,18 @@ public:
 
     void release();
 
-    void reset(media_kind_e kind, int width, int height, int64_t pts, bool key, uint8_t *data, size_t size, std::function<void(uint8_t *)> data_deleter = default_data_deleter);
+    void reset(media_kind_e kind, int width, int height, int64_t pts, bool key, uint8_t *data, size_t size, std::function<void(uint8_t *)> data_deleter = default_data_deleter, int64_t capture_mono_ns = 0);
 
     [[nodiscard]] media_kind_e kind() const { return fields.kind; }
     [[nodiscard]] int          width() const { return fields.width; }
     [[nodiscard]] int          height() const { return fields.height; }
     [[nodiscard]] int64_t      pts() const { return fields.pts; }
+    [[nodiscard]] int64_t      capture_mono_ns() const { return fields.capture_mono_ns; }
     [[nodiscard]] bool         key() const { return fields.key; }
     [[nodiscard]] uint8_t     *data() const { return fields.data; }
     [[nodiscard]] size_t       size() const { return fields.size; }
+
+    friend class data_packet;
 
 private:
     void reset_owned() noexcept;
@@ -54,6 +59,7 @@ private:
         int          width;
         int          height;
         int64_t      pts;
+        int64_t      capture_mono_ns;
         bool         key;
         uint8_t     *data;
         size_t       size;

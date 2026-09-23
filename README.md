@@ -10,9 +10,8 @@ vstreamer/
 ├── docs/
 ├── scripts/
 └── src/
-    ├── components/   # plugins (V4L2, JPEG/H.264, MKV, …)
-    ├── core/         # frames, factory, component interfaces
-    ├── network/      # stream sender/receiver (WIP)
+    ├── components/   # plugins (V4L2, stream_*, rtp pay/depay, MKV, …)
+    ├── core/         # packets, frames, factory, component interfaces
     └── test_app/
 ```
 

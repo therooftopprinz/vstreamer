@@ -41,7 +41,7 @@ class v4l2_source : public component_source
     int  open() override;
     void close() override;
 
-    int output(uint8_t port, frame &out, int timeout_ms) override;
+    int output(uint8_t port, data_packet &out, int timeout_ms) override;
 
     int configure(uint64_t key, int64_t value) override;
     int query(uint64_t key, int64_t *value) const override;

@@ -6,7 +6,9 @@
 #error "h264_decoder_mpp requires -DENABLE_H264_DECODER_MPP=ON"
 #endif
 
+#include <atomic>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -34,8 +36,10 @@ public:
     int  open() override;
     void close() override;
 
-    int input(uint8_t port, const frame &in) override;
-    int output(uint8_t port, frame &out, int timeout_ms) override;
+    void cancel_pending_io();
+
+    int input(uint8_t port, const data_packet &in) override;
+    int output(uint8_t port, data_packet &out, int timeout_ms) override;
 
     int configure(uint64_t key, int64_t value) override;
     int query(uint64_t key, int64_t *value) const override;
@@ -48,11 +52,13 @@ private:
     void free_decoder_locked();
     void clear_pending_locked();
     int  handle_info_change_locked(void *mpp_frame);
-    int  try_get_frame_locked(int timeout_ms);
-    int  pack_mpp_to_pending_locked(void *mpp_frame);
+    void drain_mpp_to_ready_locked(int timeout_ms);
+    int  fetch_one_mpp_frame_locked(int timeout_ms);
+    int  pack_mpp_to_ready_locked(void *mpp_frame);
 
     mutable std::mutex mu;
     bool               opened = false;
+    std::atomic<bool>  cancel_io {false};
 
     int width = 1280;
     int height = 720;
@@ -66,8 +72,12 @@ private:
     void *mpi = nullptr;
     void *frm_grp = nullptr;
 
-    bool  has_pending = false;
-    frame pending;
+    static constexpr size_t k_max_ready_frames = 8;
+    int64_t                 pending_capture_mono_ns = 0;
+    std::deque<frame>       ready_frames;
+
+    /* Capture-to-decoded-frame (ms); updated when output carries capture_mono_ns. */
+    double last_latency_ms = 0.0;
 
     mutable std::string query_buf;
 };

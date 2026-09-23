@@ -201,7 +201,7 @@ int mkv_sink::ensure_session_locked(int w, int h)
     return 0;
 }
 
-int mkv_sink::write_frame_locked(const frame &in)
+int mkv_sink::write_frame_locked(const data_packet &in)
 {
     auto *oc = static_cast<AVFormatContext *>(fmt);
     auto *st = static_cast<AVStream *>(stream);
@@ -212,22 +212,24 @@ int mkv_sink::write_frame_locked(const frame &in)
         return -ENOMEM;
     }
 
-    uint8_t *buf = static_cast<uint8_t *>(av_malloc(in.size()));
+    const frame_data &f = data_packet::cast<frame_data>(in);
+
+    uint8_t *buf = static_cast<uint8_t *>(av_malloc(f.buf.size));
     if (nullptr == buf)
     {
         av_packet_free(&pkt);
         return -ENOMEM;
     }
-    std::memcpy(buf, in.data(), in.size());
+    std::memcpy(buf, f.buf.data, f.buf.size);
 
     pkt->data = buf;
-    pkt->size = static_cast<int>(in.size());
+    pkt->size = static_cast<int>(f.buf.size);
     pkt->pts = pts;
     pkt->dts = pts;
     pkt->duration = 1;
     pkt->stream_index = st->index;
     pkt->flags |= AV_PKT_FLAG_KEY;
-    pkt->buf = av_buffer_create(buf, in.size(), av_buffer_default_free, nullptr, 0);
+    pkt->buf = av_buffer_create(buf, f.buf.size, av_buffer_default_free, nullptr, 0);
     if (nullptr == pkt->buf)
     {
         av_free(buf);
@@ -261,9 +263,10 @@ void mkv_sink::close()
     opened = false;
 }
 
-int mkv_sink::input(uint8_t /*port*/, const frame &in)
+int mkv_sink::input(uint8_t /*port*/, const data_packet &in)
 {
-    if (in.kind() != media_kind_e::MJPEG)
+    const frame_data &f = data_packet::cast<frame_data>(in);
+    if (f.kind != media_kind_e::MJPEG)
     {
         return -EINVAL;
     }
@@ -274,8 +277,8 @@ int mkv_sink::input(uint8_t /*port*/, const frame &in)
         return 0;
     }
 
-    int w = in.width();
-    int h = in.height();
+    int w = f.width;
+    int h = f.height;
     int r = ensure_session_locked(w, h);
     if (r < 0)
     {

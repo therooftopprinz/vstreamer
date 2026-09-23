@@ -1,10 +1,14 @@
 #include "components/noise_source.hpp"
 
+#include "core/time_util.hpp"
+
 #include "core/key_util.hpp"
 
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 extern "C"
@@ -20,7 +24,8 @@ namespace vstreamer
 namespace
 {
 
-constexpr size_t k_max_jpeg = 2ULL * 1024ULL * 1024ULL;
+/* Random 1080p MJPEG can exceed 2 MiB at default qscale. */
+constexpr size_t k_max_jpeg = 8ULL * 1024ULL * 1024ULL;
 
 double now_sec()
 {
@@ -118,7 +123,8 @@ std::string noise_source::name() const
 
 media_kind_e noise_source::output_kind() const
 {
-    return media_kind_e::MJPEG;
+    std::lock_guard<std::mutex> lock(mu);
+    return output_nv12 ? media_kind_e::NV12 : media_kind_e::MJPEG;
 }
 
 int noise_source::ensure_encoder_locked()
@@ -145,7 +151,20 @@ int noise_source::ensure_encoder_locked()
     enc->pix_fmt = AV_PIX_FMT_YUVJ420P;
     enc->time_base = AVRational{1, 1};
     enc->flags |= AV_CODEC_FLAG_QSCALE;
-    enc->global_quality = 8 * FF_QP2LAMBDA;
+    /* Random snow MJPEG is huge at low q; favor throughput on bench / rover resolutions. */
+    const int pixels = width * height;
+    if (pixels >= 1920 * 1080)
+    {
+        enc->global_quality = 31 * FF_QP2LAMBDA;
+    }
+    else if (pixels >= 1280 * 720)
+    {
+        enc->global_quality = 24 * FF_QP2LAMBDA;
+    }
+    else
+    {
+        enc->global_quality = 10 * FF_QP2LAMBDA;
+    }
     if (avcodec_open2(enc, codec, nullptr) < 0)
     {
         avcodec_free_context(&enc);
@@ -211,10 +230,13 @@ int noise_source::open()
     {
         return 0;
     }
-    int r = ensure_encoder_locked();
-    if (r < 0)
+    if (!output_nv12)
     {
-        return r;
+        int r = ensure_encoder_locked();
+        if (r < 0)
+        {
+            return r;
+        }
     }
     pts = 0;
     due_sec = 0;
@@ -230,7 +252,31 @@ void noise_source::close()
     due_sec = 0;
 }
 
-int noise_source::make_jpeg_locked(uint8_t **out, size_t *out_sz)
+int noise_source::make_nv12_locked(uint8_t **out, size_t *out_sz)
+{
+    *out = nullptr;
+    *out_sz = 0;
+    if (width < 2 || height < 2 || (width % 2) != 0 || (height % 2) != 0)
+    {
+        return -EINVAL;
+    }
+
+    const size_t y_sz = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t nv12_sz = y_sz + y_sz / 2ULL;
+    auto        *buf = static_cast<uint8_t *>(std::malloc(nv12_sz));
+    if (nullptr == buf)
+    {
+        return -ENOMEM;
+    }
+
+    fill_plane_rand(buf, width, width, height, &rng);
+    fill_plane_rand(buf + y_sz, width, width, height / 2, &rng);
+    *out = buf;
+    *out_sz = nv12_sz;
+    return 0;
+}
+
+int noise_source::make_jpeg_locked(int64_t frame_pts, uint8_t **out, size_t *out_sz)
 {
     *out = nullptr;
     *out_sz = 0;
@@ -251,7 +297,7 @@ int noise_source::make_jpeg_locked(uint8_t **out, size_t *out_sz)
     fill_plane_rand(frame->data[0], frame->linesize[0], width, height, &rng);
     fill_plane_rand(frame->data[1], frame->linesize[1], width / 2, height / 2, &rng);
     fill_plane_rand(frame->data[2], frame->linesize[2], width / 2, height / 2, &rng);
-    frame->pts = pts++;
+    frame->pts = frame_pts;
 
     if (avcodec_send_frame(enc, frame) < 0)
     {
@@ -264,6 +310,8 @@ int noise_source::make_jpeg_locked(uint8_t **out, size_t *out_sz)
     }
     if (pkt->size <= 0 || static_cast<size_t>(pkt->size) > k_max_jpeg)
     {
+        std::fprintf(stderr, "noise_source: MJPEG size %d exceeds max %zu\n", pkt->size,
+                     k_max_jpeg);
         return -EIO;
     }
 
@@ -292,7 +340,13 @@ void noise_source::pace_locked(int timeout_ms)
         due_sec += period;
     }
 
-    double wait = due_sec - now_sec();
+    const double now = now_sec();
+    double       wait = due_sec - now;
+    if (wait < -1.0)
+    {
+        due_sec = now + period;
+        wait = period;
+    }
     if (wait <= 0)
     {
         return;
@@ -313,25 +367,63 @@ void noise_source::pace_locked(int timeout_ms)
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<double>(wait)));
 }
 
-int noise_source::output(uint8_t /*port*/, frame &out, int timeout_ms)
+int noise_source::output(uint8_t /*port*/, data_packet &out, int timeout_ms)
 {
-    std::lock_guard<std::mutex> lock(mu);
+    std::unique_lock<std::mutex> lock(mu);
     if (!opened)
     {
         return -EBADF;
     }
 
+    const int64_t frame_pts = pts;
+    pts++;
+
+    if (output_nv12)
+    {
+        uint8_t *nv12 = nullptr;
+        size_t   nsz = 0;
+        int      r = make_nv12_locked(&nv12, &nsz);
+        if (r < 0)
+        {
+            pts--;
+            return r;
+        }
+
+        auto fd = std::make_unique<frame_data>();
+        fd->kind = media_kind_e::NV12;
+        fd->width = width;
+        fd->height = height;
+        fd->pts = frame_pts;
+        fd->capture_mono_ns = steady_mono_ns();
+        fd->key = true;
+        fd->buf.reset(nv12, nsz, [](uint8_t *p) { std::free(p); });
+        out.reset(std::move(fd));
+
+        lock.unlock();
+        pace_locked(timeout_ms);
+        return 0;
+    }
+
     uint8_t *jpeg = nullptr;
     size_t   jsz = 0;
-    int      r = make_jpeg_locked(&jpeg, &jsz);
+    int      r = make_jpeg_locked(frame_pts, &jpeg, &jsz);
     if (r < 0)
     {
+        pts--;
         return r;
     }
 
-    out.reset(media_kind_e::MJPEG, width, height, pts - 1, true, jpeg, jsz,
-              [](uint8_t *p) { std::free(p); });
+    auto fd = std::make_unique<frame_data>();
+    fd->kind = media_kind_e::MJPEG;
+    fd->width = width;
+    fd->height = height;
+    fd->pts = frame_pts;
+    fd->capture_mono_ns = steady_mono_ns();
+    fd->key = true;
+    fd->buf.reset(jpeg, jsz, [](uint8_t *p) { std::free(p); });
+    out.reset(std::move(fd));
 
+    lock.unlock();
     pace_locked(timeout_ms);
     return 0;
 }
@@ -382,10 +474,16 @@ int noise_source::configure(std::string_view key, std::string_view *value)
     }
     if (key == "format")
     {
+        if (v == "nv12" || v == "NV12")
+        {
+            output_nv12 = true;
+            return 0;
+        }
         if (v != "mjpeg" && v != "mjpg" && v != "MJPEG" && v != "MJPG")
         {
             return -EINVAL;
         }
+        output_nv12 = false;
         return 0;
     }
     return -EINVAL;
@@ -401,7 +499,7 @@ int noise_source::query(std::string_view key, std::string_view *value) const
     std::lock_guard<std::mutex> lock(mu);
     if (key == "status")
     {
-        query_buf = "noise";
+        query_buf = output_nv12 ? "noise_nv12" : "noise_mjpeg";
         *value = query_buf;
         return 0;
     }
@@ -429,7 +527,41 @@ int noise_source::query(std::string_view key, std::string_view *value) const
     }
     if (key == "format")
     {
-        query_buf = "mjpeg";
+        query_buf = output_nv12 ? "nv12" : "mjpeg";
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "device")
+    {
+        query_buf = "noise";
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "media_type")
+    {
+        query_buf = output_nv12 ? "raw" : "mjpeg";
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "pixel_type")
+    {
+        query_buf = output_nv12 ? "raw" : "mjpeg";
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "width")
+    {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d", width);
+        query_buf = buf;
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "height")
+    {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d", height);
+        query_buf = buf;
         *value = query_buf;
         return 0;
     }
