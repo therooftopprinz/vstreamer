@@ -1,5 +1,6 @@
 #include "components/rtp_h264_depay.hpp"
 
+#include "core/fec_stream_header.hpp"
 #include "core/key_util.hpp"
 
 #include <cerrno>
@@ -68,7 +69,14 @@ int rtp_h264_depay::input(uint8_t port, const data_packet &in)
     const sock_data &s = data_packet::cast<sock_data>(in);
     std::lock_guard<std::mutex> lock(mu);
     std::vector<uint8_t>        au;
-    const int                   ready = depay.feed(s.buf.data, s.buf.size, &au);
+    const uint8_t *             feed_ptr = s.buf.data;
+    size_t                      feed_len = s.buf.size;
+    if (feed_len >= k_fec_stream_header_len)
+    {
+        feed_ptr += k_fec_stream_header_len;
+        feed_len -= k_fec_stream_header_len;
+    }
+    const int ready = depay.feed(feed_ptr, feed_len, &au);
     if (ready < 0)
     {
         return ready;

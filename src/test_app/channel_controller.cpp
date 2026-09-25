@@ -1,6 +1,7 @@
 #include "test_app/channel_controller.hpp"
 
-#include "components/encoder_cbr_logic.hpp"
+#include "components/stream_sender.hpp"
+#include "core/component_coder.hpp"
 #include "core/metrics.hpp"
 
 #include <cerrno>
@@ -70,6 +71,11 @@ channel_controller::channel_controller() = default;
 channel_controller::~channel_controller()
 {
     stop();
+}
+
+void channel_controller::set_stream_sender(vstreamer::stream_sender *sender)
+{
+    stream_tx = sender;
 }
 
 void channel_controller::set_max_kbps(double kbps)
@@ -299,9 +305,18 @@ void channel_controller::set_pipeline_metrics_refresh(std::function<void()> refr
     pipeline_metrics_refresh = std::move(refresh);
 }
 
-void channel_controller::set_cbr_pid_logic(vstreamer::encoder_cbr_logic *logic)
+void channel_controller::set_encode_target(vstreamer::component_coder *encoder)
 {
-    cbr_pid_logic = logic;
+    encode_target = encoder;
+}
+
+void channel_controller::set_encode_command_handlers(std::function<bool(int kbps)> set_cbr_kbps,
+                                                     std::function<bool(int qp)> set_qp,
+                                                     std::function<bool(int gop)> set_gop)
+{
+    encode_set_cbr_kbps = std::move(set_cbr_kbps);
+    encode_set_qp = std::move(set_qp);
+    encode_set_gop = std::move(set_gop);
 }
 
 void channel_controller::send_pipeline_metrics(int reply_fd, const sockaddr_in &reply)
@@ -343,9 +358,13 @@ void channel_controller::handle_console_line(const char *line, int reply_fd,
         static const char help_msg[] =
             "set_max_kbps <kbps>\n"
             "set_constant_loss <pct>\n"
-            "set_cbr_pid kp=.. step_down=.. step_up=.. (see cbr_pid)\n"
-            "set_cbr_pid defaults | reset\n"
-            "cbr_pid | get_cbr_pid\n"
+            "set_fec none\n"
+            "set_fec_k <k>\n"
+            "set_fec_n <n>\n"
+            "set_encode_cbr <kbps>\n"
+            "set_encode_qp <qp>\n"
+            "set_gop <gop>\n"
+            "get_metric <metric_name>\n"
             "ping\n"
             "stats\n"
             "metrics\n"
@@ -402,13 +421,243 @@ void channel_controller::handle_console_line(const char *line, int reply_fd,
         return;
     }
 
-    if (nullptr != cbr_pid_logic &&
-        (0 == std::strncmp(work, "set_cbr_pid ", 12) || 0 == std::strcmp(work, "cbr_pid") ||
-         0 == std::strcmp(work, "get_cbr_pid")))
+    if (0 == std::strcmp(work, "set_fec none"))
     {
-        char reply[512];
-        cbr_pid_logic->handle_pid_console_line(work, reply, sizeof(reply));
-        sendto(reply_fd, reply, std::strlen(reply), 0, reinterpret_cast<const sockaddr *>(&reply),
+        if (nullptr == stream_tx)
+        {
+            const char *msg = "err stream_sender not configured\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        static const char none_mode[] = "none";
+        std::string_view val = none_mode;
+        if (stream_tx->configure("fec", &val) < 0)
+        {
+            const char *msg = "err set_fec none\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *msg = "ok\n";
+        sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+               sizeof(reply));
+        return;
+    }
+
+    if (0 == std::strncmp(work, "set_fec_k ", 10))
+    {
+        if (nullptr == stream_tx)
+        {
+            const char *msg = "err stream_sender not configured\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *arg = work + 10;
+        char       *end = nullptr;
+        const long  k = std::strtol(arg, &end, 10);
+        if (end == arg || k < 1 || k > 254)
+        {
+            const char *msg = "err bad k (1..254)\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%ld", k);
+        std::string_view val = buf;
+        if (stream_tx->configure("fec_k", &val) < 0)
+        {
+            const char *msg = "err set_fec_k (need k <= n)\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *msg = "ok\n";
+        sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+               sizeof(reply));
+        return;
+    }
+
+    if (0 == std::strncmp(work, "set_fec_n ", 10))
+    {
+        if (nullptr == stream_tx)
+        {
+            const char *msg = "err stream_sender not configured\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *arg = work + 10;
+        char       *end = nullptr;
+        const long  n = std::strtol(arg, &end, 10);
+        if (end == arg || n < 1 || n > 255)
+        {
+            const char *msg = "err bad n (1..255)\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%ld", n);
+        std::string_view val = buf;
+        if (stream_tx->configure("fec_n", &val) < 0)
+        {
+            const char *msg = "err set_fec_n (need k <= n)\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *msg = "ok\n";
+        sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+               sizeof(reply));
+        return;
+    }
+
+    if (0 == std::strncmp(work, "set_encode_cbr ", 15))
+    {
+        const char *arg = work + 15;
+        char       *end = nullptr;
+        const long  kbps = std::strtol(arg, &end, 10);
+        if (end == arg || kbps < 100 || kbps > 200'000)
+        {
+            const char *msg = "err bad kbps (100..200000)\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        bool ok = false;
+        if (encode_set_cbr_kbps)
+        {
+            ok = encode_set_cbr_kbps(static_cast<int>(kbps));
+        }
+        else if (nullptr != encode_target)
+        {
+            char bps_buf[32];
+            std::snprintf(bps_buf, sizeof(bps_buf), "%ld", kbps * 1000L);
+            std::string_view val = bps_buf;
+            ok = encode_target->configure("cbr", &val) == 0;
+        }
+        if (!ok)
+        {
+            const char *msg = encode_set_cbr_kbps || nullptr != encode_target
+                                  ? "err set cbr failed\n"
+                                  : "err encoder not configured\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *msg = "ok\n";
+        sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+               sizeof(reply));
+        return;
+    }
+
+    if (0 == std::strncmp(work, "set_gop ", 8))
+    {
+        const char *arg = work + 8;
+        char       *end = nullptr;
+        const long  gop = std::strtol(arg, &end, 10);
+        if (end == arg || gop < 1 || gop > 255)
+        {
+            const char *msg = "err bad gop (1..255)\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        bool ok = false;
+        if (encode_set_gop)
+        {
+            ok = encode_set_gop(static_cast<int>(gop));
+        }
+        else if (nullptr != encode_target)
+        {
+            char gop_buf[16];
+            std::snprintf(gop_buf, sizeof(gop_buf), "%ld", gop);
+            std::string_view val = gop_buf;
+            ok = encode_target->configure("gop", &val) == 0;
+        }
+        if (!ok)
+        {
+            const char *msg = encode_set_gop || nullptr != encode_target ? "err set gop failed\n"
+                                                                         : "err encoder not configured\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *msg = "ok\n";
+        sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+               sizeof(reply));
+        return;
+    }
+
+    if (0 == std::strncmp(work, "set_encode_qp ", 14))
+    {
+        const char *arg = work + 14;
+        char       *end = nullptr;
+        const long  qp = std::strtol(arg, &end, 10);
+        if (end == arg || qp < 0 || qp > 51)
+        {
+            const char *msg = "err bad qp (0..51)\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        bool ok = false;
+        if (encode_set_qp)
+        {
+            ok = encode_set_qp(static_cast<int>(qp));
+        }
+        else if (nullptr != encode_target)
+        {
+            char qp_buf[16];
+            std::snprintf(qp_buf, sizeof(qp_buf), "%ld", qp);
+            std::string_view val = qp_buf;
+            ok = encode_target->configure("qp", &val) == 0;
+        }
+        if (!ok)
+        {
+            const char *msg = encode_set_qp || nullptr != encode_target ? "err set qp failed\n"
+                                                                        : "err encoder not configured\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        const char *msg = "ok\n";
+        sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+               sizeof(reply));
+        return;
+    }
+
+    if (0 == std::strncmp(work, "get_metric ", 11))
+    {
+        char *name = work + 11;
+        trim_inplace(name);
+        if ('\0' == name[0])
+        {
+            const char *msg = "err metric name required\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        if (nullptr == pipeline_metrics)
+        {
+            const char *msg = "err metrics not configured\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        std::string value;
+        if (!pipeline_metrics->format_metric(name, &value))
+        {
+            const char *msg = "err unknown metric\n";
+            sendto(reply_fd, msg, std::strlen(msg), 0, reinterpret_cast<const sockaddr *>(&reply),
+                   sizeof(reply));
+            return;
+        }
+        value.push_back('\n');
+        sendto(reply_fd, value.data(), value.size(), 0, reinterpret_cast<const sockaddr *>(&reply),
                sizeof(reply));
         return;
     }

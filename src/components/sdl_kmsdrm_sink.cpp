@@ -1,4 +1,4 @@
-#include "components/sdl_dmks_sink.hpp"
+#include "components/sdl_kmsdrm_sink.hpp"
 
 #include <cerrno>
 #include <cstdio>
@@ -7,24 +7,24 @@
 namespace vstreamer
 {
 
-sdl_dmks_sink::sdl_dmks_sink() = default;
+sdl_kmsdrm_sink::sdl_kmsdrm_sink() = default;
 
-sdl_dmks_sink::~sdl_dmks_sink()
+sdl_kmsdrm_sink::~sdl_kmsdrm_sink()
 {
     close();
 }
 
-std::string sdl_dmks_sink::name() const
+std::string sdl_kmsdrm_sink::name() const
 {
-    return "sdl_dmks_sink";
+    return "sdl_kmsdrm_sink";
 }
 
-media_kind_e sdl_dmks_sink::input_kind() const
+media_kind_e sdl_kmsdrm_sink::input_kind() const
 {
     return media_kind_e::NV12;
 }
 
-int sdl_dmks_sink::open()
+int sdl_kmsdrm_sink::open()
 {
     std::lock_guard<std::mutex> lock(mu);
     if (opened)
@@ -34,7 +34,7 @@ int sdl_dmks_sink::open()
     int r = present.open();
     if (r < 0)
     {
-        std::fprintf(stderr, "sdl_dmks_sink: open failed (%d", r);
+        std::fprintf(stderr, "sdl_kmsdrm_sink: open failed (%d", r);
         if (-r > 0 && -r < 4096)
         {
             std::fprintf(stderr, "; %s", std::strerror(-r));
@@ -46,14 +46,14 @@ int sdl_dmks_sink::open()
     return 0;
 }
 
-void sdl_dmks_sink::close()
+void sdl_kmsdrm_sink::close()
 {
     std::lock_guard<std::mutex> lock(mu);
     present.close();
     opened = false;
 }
 
-int sdl_dmks_sink::prepare(int width, int height)
+int sdl_kmsdrm_sink::prepare(int width, int height)
 {
     std::lock_guard<std::mutex> lock(mu);
     if (!opened)
@@ -63,7 +63,7 @@ int sdl_dmks_sink::prepare(int width, int height)
     const int r = present.prepare(width, height, opened);
     if (r < 0)
     {
-        std::fprintf(stderr, "sdl_dmks_sink: prepare(%d,%d) failed (%d", width, height, r);
+        std::fprintf(stderr, "sdl_kmsdrm_sink: prepare(%d,%d) failed (%d", width, height, r);
         if (-r > 0 && -r < 4096)
         {
             std::fprintf(stderr, "; %s", std::strerror(-r));
@@ -73,7 +73,7 @@ int sdl_dmks_sink::prepare(int width, int height)
     return r;
 }
 
-int sdl_dmks_sink::input(uint8_t port, const data_packet &in)
+int sdl_kmsdrm_sink::input(uint8_t port, const data_packet &in)
 {
     if (0 != port)
     {
@@ -104,7 +104,7 @@ int sdl_dmks_sink::input(uint8_t port, const data_packet &in)
         {
             char detail[192];
             present.stats_string(detail, sizeof(detail), frames_in);
-            std::fprintf(stderr, "sdl_dmks_sink: present failed (%d", r);
+            std::fprintf(stderr, "sdl_kmsdrm_sink: present failed (%d", r);
             if (-r > 0 && -r < 4096)
             {
                 std::fprintf(stderr, "; %s", std::strerror(-r));
@@ -115,17 +115,17 @@ int sdl_dmks_sink::input(uint8_t port, const data_packet &in)
     return r;
 }
 
-int sdl_dmks_sink::configure(uint64_t /*key*/, int64_t /*value*/)
+int sdl_kmsdrm_sink::configure(uint64_t /*key*/, int64_t /*value*/)
 {
     return -ENOTSUP;
 }
 
-int sdl_dmks_sink::query(uint64_t /*key*/, int64_t * /*value*/) const
+int sdl_kmsdrm_sink::query(uint64_t /*key*/, int64_t * /*value*/) const
 {
     return -ENOTSUP;
 }
 
-int sdl_dmks_sink::configure(std::string_view key, std::string_view *value)
+int sdl_kmsdrm_sink::configure(std::string_view key, std::string_view *value)
 {
     if (nullptr == value)
     {
@@ -140,7 +140,7 @@ int sdl_dmks_sink::configure(std::string_view key, std::string_view *value)
     return -ENOTSUP;
 }
 
-int sdl_dmks_sink::query(std::string_view key, std::string_view *value) const
+int sdl_kmsdrm_sink::query(std::string_view key, std::string_view *value) const
 {
     if (nullptr == value)
     {

@@ -16,7 +16,7 @@
 namespace vstreamer
 {
 
-/* Shared SDL NV12 window/texture path for sdl_sink and sdl_dmks_sink. */
+/* Shared SDL NV12 window/texture path for sdl_sink and sdl_kmsdrm_sink. */
 class sdl_nv12_presenter
 {
 public:

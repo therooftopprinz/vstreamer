@@ -14,10 +14,13 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "core/component_source.hpp"
 #include "core/data_packet.hpp"
 #include "core/packet_pool.hpp"
+#include "core/rs_block_erasure.hpp"
+#include "core/stream_telemetry.hpp"
 
 namespace vstreamer
 {
@@ -48,9 +51,14 @@ public:
     int configure(std::string_view key, std::string_view *value) override;
     int query(std::string_view key, std::string_view *value) const override;
 
+    [[nodiscard]] stream_receiver_counters link_counters_snapshot() const;
+
 private:
     void recv_thread_main();
     void stop_recv_thread();
+    void ingest_datagram(const uint8_t *data, size_t len);
+    void enqueue_payloads(std::vector<std::vector<uint8_t>> *payloads);
+    void enqueue_payload_copy(const uint8_t *data, size_t len);
 
     mutable std::mutex mu;
     bool               opened = false;
@@ -65,17 +73,35 @@ private:
     std::deque<data_packet> payload_queue;
     static constexpr size_t k_queue_depth = 4096;
 
-    uint64_t recv_pkts = 0;
+    uint64_t udp_packet_received = 0;
+    uint64_t fec_packet_received = 0;
+    uint64_t udp_gap_count = 0;
+    /* Post-FEC output: undelivered app packets after RS (see take_fail_lost_app_pkts). */
+    uint64_t fec_gap_count = 0;
+    /* Wire air shards before RS (stream_sequence loss uses udp_gap_count). */
+    uint64_t fec_air_shard_received = 0;
+
     uint64_t recv_bytes = 0;
+    uint64_t recv_wire_bytes = 0;
+
+    double   egress_rate_t0 = 0.;
+    uint64_t egress_rate_bytes = 0;
+    float    egress_kbps = 0.f;
     uint64_t recv_dropped = 0;
-    uint64_t recv_lost = 0;
-    uint16_t last_rtp_seq = 0;
-    bool     have_rtp_seq = false;
+
+    uint16_t last_udp_seq = 0;
+    bool     have_udp_seq = false;
+
+    uint16_t fec_payload_sequence = 0;
 
     std::thread       recv_thread;
     std::atomic<bool> recv_stop {false};
 
     mutable std::string query_buf;
+
+    rs_block_erasure fec;
+    uint64_t           fec_rec = 0;
+    uint64_t           fec_lost = 0;
 };
 
 }  // namespace vstreamer

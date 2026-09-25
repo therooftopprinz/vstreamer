@@ -33,6 +33,9 @@ public:
 
     [[nodiscard]] std::string to_string() const;
 
+    /* Single metric by full name (e.g. stream_sender.loss_pct). */
+    [[nodiscard]] bool format_metric(const std::string &name, std::string *out) const;
+
 private:
     mutable std::mutex mu;
 

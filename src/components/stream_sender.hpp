@@ -19,18 +19,15 @@
 
 #include "core/stream_telemetry.hpp"
 #include "core/component_sink.hpp"
-#include "core/component_stream_telemetry.hpp"
 #include "core/data_packet.hpp"
 #include "core/packet_pool.hpp"
+#include "core/rs_block_erasure.hpp"
 
 namespace vstreamer
 {
 
-/*
- * Pad 0 (sink): SOCK in from rtp_h264_pay → UDP egress.
- * Pad 1 (telemetry): stream_telemetry out → rate / CBR logic (see component_stream_telemetry).
- */
-class stream_sender : public component_sink, public component_stream_telemetry
+/* Pad 0 (sink): SOCK in from rtp_h264_pay → UDP egress. Link metrics via query(). */
+class stream_sender : public component_sink
 {
 public:
     stream_sender();
@@ -54,10 +51,7 @@ public:
     int set_enabled(bool on, int timeout_ms) override;
     [[nodiscard]] bool enabled() const override;
 
-    [[nodiscard]] stream_telemetry telemetry_snapshot() const override;
-
-    /* Forward-path loss (0–1); not derived from the TX queue. */
-    void set_channel_loss(float loss);
+    void set_receiver_counters(stream_receiver_counters counters);
 
     int configure(uint64_t key, int64_t value) override;
     int query(uint64_t key, int64_t *value) const override;
@@ -68,8 +62,13 @@ public:
 private:
     void send_thread_main();
     void stop_send_thread();
-    void update_telemetry_locked();
     void pace_wire_send(size_t bytes);
+    void enqueue_wire_copy(const uint8_t *data, size_t len);
+    void enqueue_fec_air(std::vector<std::vector<uint8_t>> *air);
+    /* Flush partial block, (re)init with current k/n/timeout. No locks held. */
+    int  reinit_fec_if_active();
+    /* Flush partial block and stop encoding. No locks held. */
+    void disable_fec();
 
     mutable std::mutex mu;
     bool               opened = false;
@@ -85,8 +84,7 @@ private:
     double            deadline_sec = 0;
     mutable std::mutex gate_mu;
 
-    stream_telemetry tel {};
-    float            link_loss = 0.f;
+    stream_receiver_counters peer {};
 
     packet_pool pool;
 
@@ -102,14 +100,27 @@ private:
     uint64_t bytes_sent = 0;
     uint64_t dropped = 0;
 
-    double   egress_rate_t0 = 0.;
-    uint64_t egress_rate_bytes = 0;
+    double   ingress_rate_t0 = 0.;
+    uint64_t ingress_rate_bytes = 0;
+    float    ingress_kbps = 0.f;
 
     std::atomic<int> max_wire_kbps {0};
     double           pace_bucket_bytes = 0.;
     double           pace_last_sec = 0.;
 
     mutable std::string query_buf;
+
+    /* Guards fec (touched by input(), the send thread and configure()).
+     * Lock order: mu -> fec_mu; never hold fec_mu while taking mu/q_mu. */
+    mutable std::mutex fec_mu;
+    rs_block_erasure   fec;
+    bool              fec_block = false;
+    int               fec_k = 10;
+    int               fec_n = 12;
+    int               fec_timeout_ms = rs_block_erasure::k_default_timeout_ms;
+    uint64_t          fec_oversized = 0;
+
+    std::atomic<uint16_t> stream_sequence {0};
 };
 
 }  // namespace vstreamer

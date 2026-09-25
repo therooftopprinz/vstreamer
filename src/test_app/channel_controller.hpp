@@ -14,7 +14,8 @@
 namespace vstreamer
 {
 class metrics;
-class encoder_cbr_logic;
+class component_coder;
+class stream_sender;
 }
 
 namespace vstreamer::test_app
@@ -49,7 +50,12 @@ public:
 
     void set_pipeline_metrics(const vstreamer::metrics *source);
     void set_pipeline_metrics_refresh(std::function<void()> refresh);
-    void set_cbr_pid_logic(vstreamer::encoder_cbr_logic *logic);
+    void set_encode_target(vstreamer::component_coder *encoder);
+    /* Non-blocking: handlers queue work for the encode thread (preferred). */
+    void set_encode_command_handlers(std::function<bool(int kbps)> set_cbr_kbps,
+                                     std::function<bool(int qp)> set_qp,
+                                     std::function<bool(int gop)> set_gop = {});
+    void set_stream_sender(vstreamer::stream_sender *sender);
 
     void set_max_kbps(double kbps);
     void set_constant_loss(double pct);
@@ -123,7 +129,11 @@ private:
 
     const vstreamer::metrics *pipeline_metrics = nullptr;
     std::function<void()>     pipeline_metrics_refresh;
-    vstreamer::encoder_cbr_logic *cbr_pid_logic = nullptr;
+    vstreamer::component_coder *encode_target = nullptr;
+    std::function<bool(int kbps)> encode_set_cbr_kbps;
+    std::function<bool(int qp)>   encode_set_qp;
+    std::function<bool(int gop)>  encode_set_gop;
+    vstreamer::stream_sender     *stream_tx = nullptr;
 };
 
 }  // namespace vstreamer::test_app

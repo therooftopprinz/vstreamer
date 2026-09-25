@@ -1,7 +1,11 @@
 #include "components/stream_receiver.hpp"
 
+#include "core/fec_stream_header.hpp"
 #include "core/host_util.hpp"
 #include "core/key_util.hpp"
+#include "core/sequence_gap.hpp"
+#include "core/stream_air_limits.hpp"
+#include "core/stream_header.hpp"
 
 #include <cerrno>
 #include <cinttypes>
@@ -10,36 +14,46 @@
 
 #include <chrono>
 #include <thread>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 namespace
 {
 
-uint64_t note_rtp_sequence_gap(const uint8_t *buf, size_t n, uint16_t &last_seq, bool &have_seq)
+double now_sec()
 {
-    if (n < 12 || (buf[0] & 0xC0) != 0x80)
+    struct timespec ts {};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+}
+
+void update_kbps_window(double &t0, uint64_t &acc, float &kbps, size_t nbytes)
+{
+    const double t = now_sec();
+    if (t0 <= 0.)
     {
-        return 0;
+        t0 = t;
     }
-    const uint16_t seq = static_cast<uint16_t>((static_cast<uint16_t>(buf[2]) << 8) | buf[3]);
-    if (!have_seq)
+    acc += nbytes;
+    const double dt = t - t0;
+    if (dt >= 0.5)
     {
-        have_seq = true;
-        last_seq = seq;
-        return 0;
+        kbps = static_cast<float>(acc * 8.0 / dt / 1000.0);
+        t0 = t;
+        acc = 0;
     }
-    const uint16_t next = static_cast<uint16_t>(last_seq + 1);
-    uint64_t       lost = 0;
-    if (seq != next)
-    {
-        lost = static_cast<uint16_t>(seq - next);
-    }
-    last_seq = seq;
-    return lost;
+}
+
+void note_fec_output_gaps(vstreamer::rs_block_erasure &fec, uint64_t &fec_gap_count)
+{
+    fec_gap_count += fec.take_fail_lost_app_pkts();
+    (void)fec.take_fail_missing_shards();
+    (void)fec.take_decode_fail();
 }
 
 }  // namespace
@@ -73,6 +87,103 @@ packet_kind_e stream_receiver::output_packet_kind(uint8_t port) const
     return packet_kind_e::SOCK;
 }
 
+void stream_receiver::enqueue_payload_copy(const uint8_t *data, size_t len)
+{
+    if (nullptr == data || 0 == len || len + k_fec_stream_header_len > k_stream_payload_max)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        recv_dropped++;
+        return;
+    }
+
+    data_packet pkt;
+    const size_t wire_len = k_fec_stream_header_len + len;
+    uint8_t     *copy = pool.acquire(wire_len);
+    if (nullptr == copy)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        recv_dropped++;
+        return;
+    }
+
+    const uint16_t seq = fec_payload_sequence++;
+    fec_stream_header_store_be16(copy, seq);
+    std::memcpy(copy + k_fec_stream_header_len, data, len);
+    auto sd = std::make_unique<sock_data>();
+    sd->pts = 0;
+    sd->buf.reset(copy, wire_len, &packet_pool::release);
+    pkt.reset(std::move(sd));
+
+    bool evicted = false;
+    {
+        std::lock_guard<std::mutex> lock(q_mu);
+        if (payload_queue.size() >= k_queue_depth)
+        {
+            payload_queue.pop_front();
+            evicted = true;
+        }
+        payload_queue.push_back(std::move(pkt));
+    }
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        fec_packet_received++;
+        recv_bytes += len;
+        if (evicted)
+        {
+            recv_dropped++;
+        }
+    }
+    q_cv.notify_all();
+}
+
+void stream_receiver::enqueue_payloads(std::vector<std::vector<uint8_t>> *payloads)
+{
+    if (nullptr == payloads)
+    {
+        return;
+    }
+    for (const auto &payload : *payloads)
+    {
+        enqueue_payload_copy(payload.data(), payload.size());
+    }
+    payloads->clear();
+}
+
+void stream_receiver::ingest_datagram(const uint8_t *data, size_t len)
+{
+    std::vector<std::vector<uint8_t>> payloads;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        udp_packet_received++;
+        recv_wire_bytes += len;
+
+        /* stream_header_s always prefixes the FEC shard (UDP gap telemetry). */
+        const uint8_t *fec_buf = data;
+        size_t         fec_len = len;
+        if (stream_datagram_len_ok(len))
+        {
+            const uint16_t seq = stream_header_sequence_be16(data);
+            udp_gap_count +=
+                note_u16_forward_gap(seq, last_udp_seq, have_udp_seq);
+            const uint8_t *fec_ptr = stream_fec_shard(data, len, &fec_len);
+            if (fec_ptr != nullptr)
+            {
+                fec_buf = fec_ptr;
+            }
+            if (fec_len >= rs_block_erasure::k_header_len)
+            {
+                fec_air_shard_received++;
+            }
+        }
+
+        fec.push_air(fec_buf, fec_len, &payloads);
+        note_fec_output_gaps(fec, fec_gap_count);
+        fec_rec = fec.recovered();
+        fec_lost = fec.decode_fail();
+    }
+    enqueue_payloads(&payloads);
+}
+
 void stream_receiver::stop_recv_thread()
 {
     if (!recv_thread.joinable())
@@ -96,78 +207,76 @@ void stream_receiver::stop_recv_thread()
 
 void stream_receiver::recv_thread_main()
 {
-    uint8_t buf[2048];
+    /* Bounded wait so block expiry and the in-order emit queue advance even
+     * when the wire goes quiet (e.g. tail of a burst loss). */
+    constexpr int k_poll_ms = 10;
+    uint8_t       buf[2048];
     while (!recv_stop)
     {
-        if (recv_fd < 0)
+        int fd = -1;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            fd = recv_fd;
+        }
+        if (fd < 0)
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
-        ssize_t n = recv(recv_fd, buf, sizeof(buf), 0);
-        if (n <= 0)
+        pollfd pfd {};
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        const int pr = poll(&pfd, 1, k_poll_ms);
+        if (recv_stop)
         {
-            if (recv_stop)
+            break;
+        }
+        if (pr < 0)
+        {
+            if (EINTR == errno)
             {
-                break;
+                continue;
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
 
-        for (;;)
+        if (pr > 0)
         {
+            /* Drain everything that is ready before ticking. */
+            for (;;)
             {
-                std::lock_guard<std::mutex> lock(mu);
-                recv_lost += note_rtp_sequence_gap(buf, static_cast<size_t>(n), last_rtp_seq,
-                                                   have_rtp_seq);
-            }
-
-            data_packet pkt;
-            uint8_t    *copy = pool.acquire(static_cast<size_t>(n));
-            if (nullptr == copy)
-            {
-                {
-                    std::lock_guard<std::mutex> lock(mu);
-                    recv_dropped++;
-                }
-                break;
-            }
-
-            std::memcpy(copy, buf, static_cast<size_t>(n));
-            auto sd = std::make_unique<sock_data>();
-            sd->pts = 0;
-            sd->buf.reset(copy, static_cast<size_t>(n), &packet_pool::release);
-            pkt.reset(std::move(sd));
-
-            {
-                std::lock_guard<std::mutex> lock(mu);
-                recv_pkts++;
-                recv_bytes += static_cast<uint64_t>(n);
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(q_mu);
-                if (payload_queue.size() >= k_queue_depth)
-                {
-                    payload_queue.pop_front();
-                    recv_dropped++;
-                }
-                payload_queue.push_back(std::move(pkt));
-            }
-            q_cv.notify_all();
-
-            n = recv(recv_fd, buf, sizeof(buf), MSG_DONTWAIT);
-            if (n <= 0)
-            {
-                if (n < 0 && (EAGAIN == errno || EWOULDBLOCK == errno))
+                const ssize_t n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+                if (n <= 0)
                 {
                     break;
                 }
-                break;
+                ingest_datagram(buf, static_cast<size_t>(n));
             }
         }
+
+        std::vector<std::vector<uint8_t>> payloads;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            fec.poll_rx(&payloads);
+            note_fec_output_gaps(fec, fec_gap_count);
+            fec_lost = fec.decode_fail();
+        }
+        enqueue_payloads(&payloads);
     }
+}
+
+stream_receiver_counters stream_receiver::link_counters_snapshot() const
+{
+    std::lock_guard<std::mutex> lock(mu);
+    stream_receiver_counters c;
+    c.udp_packet_received = udp_packet_received;
+    c.fec_packet_received = fec_packet_received;
+    c.udp_gap_count = udp_gap_count;
+    c.fec_gap_count = fec_gap_count;
+    c.fec_air_shard_received = fec_air_shard_received;
+    return c;
 }
 
 int stream_receiver::open()
@@ -236,9 +345,14 @@ int stream_receiver::open()
     constexpr int k_sock_buf = 16 * 1024 * 1024;
     (void)setsockopt(recv_fd, SOL_SOCKET, SO_RCVBUF, &k_sock_buf, sizeof(k_sock_buf));
 
-    recv_lost = 0;
-    last_rtp_seq = 0;
-    have_rtp_seq = false;
+    udp_packet_received = 0;
+    fec_packet_received = 0;
+    udp_gap_count = 0;
+    fec_gap_count = 0;
+    fec_air_shard_received = 0;
+    last_udp_seq = 0;
+    have_udp_seq = false;
+    fec_payload_sequence = 0;
     opened = true;
     recv_stop = false;
     recv_thread = std::thread(&stream_receiver::recv_thread_main, this);
@@ -290,8 +404,15 @@ int stream_receiver::output(uint8_t port, data_packet &out, int timeout_ms)
         return -EAGAIN;
     }
 
+    const size_t egress_bytes =
+        data_packet::cast<sock_data>(payload_queue.front()).buf.size;
     out = std::move(payload_queue.front());
     payload_queue.pop_front();
+    lock.unlock();
+    {
+        std::lock_guard<std::mutex> slock(mu);
+        update_kbps_window(egress_rate_t0, egress_rate_bytes, egress_kbps, egress_bytes);
+    }
     return 0;
 }
 
@@ -335,13 +456,70 @@ int stream_receiver::query(std::string_view key, std::string_view *value) const
         *value = query_buf;
         return 0;
     }
+    if ("out_rate" == key)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(egress_kbps));
+        query_buf = buf;
+        *value = query_buf;
+        return 0;
+    }
+    if ("udp_packet_received" == key || "fec_packet_received" == key || "udp_gap_count" == key ||
+        "fec_gap_count" == key || "fec_air_shard_received" == key)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        uint64_t n = 0;
+        if ("udp_packet_received" == key)
+        {
+            n = udp_packet_received;
+        }
+        else if ("fec_packet_received" == key)
+        {
+            n = fec_packet_received;
+        }
+        else if ("udp_gap_count" == key)
+        {
+            n = udp_gap_count;
+        }
+        else if ("fec_gap_count" == key)
+        {
+            n = fec_gap_count;
+        }
+        else
+        {
+            n = fec_air_shard_received;
+        }
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%" PRIu64, n);
+        query_buf = buf;
+        *value = query_buf;
+        return 0;
+    }
+    if ("fec_recovered" == key || "fec_failures" == key)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        char buf[32];
+        const uint64_t n = ("fec_recovered" == key) ? fec_rec : fec_lost;
+        std::snprintf(buf, sizeof(buf), "%" PRIu64, n);
+        query_buf = buf;
+        *value = query_buf;
+        return 0;
+    }
     if ("stats" == key)
     {
         std::lock_guard<std::mutex> lock(mu);
-        char buf[64];
+        char buf[320];
         std::snprintf(buf, sizeof(buf),
-                      "pkts=%" PRIu64 " bytes=%" PRIu64 " dropped=%" PRIu64 " lost=%" PRIu64,
-                      recv_pkts, recv_bytes, recv_dropped, recv_lost);
+                      "udp_packet_received=%" PRIu64 " fec_packet_received=%" PRIu64
+                      " udp_gap_count=%" PRIu64 " fec_gap_count=%" PRIu64
+                      " fec_air_shard_received=%" PRIu64
+                      " bytes=%" PRIu64 " wire_bytes=%" PRIu64 " dropped=%" PRIu64
+                      " out_rate=%.1f fec_recovered=%" PRIu64 " fec_failures=%" PRIu64,
+                      udp_packet_received, fec_packet_received, udp_gap_count, fec_gap_count,
+                      fec_air_shard_received, recv_bytes,
+                      recv_wire_bytes, recv_dropped, static_cast<double>(egress_kbps), fec_rec,
+                      fec_lost);
         query_buf = buf;
         *value = query_buf;
         return 0;

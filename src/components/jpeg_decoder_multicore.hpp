@@ -85,6 +85,7 @@ private:
     int                worker_cpu = -1;
     output_mode_e      output_mode = output_mode_e::filter;
     media_kind_e       output_format = media_kind_e::NV12;
+    mutable std::string decoded_pix_fmt = "unknown";
 
     mutable std::mutex      life_mu;
     bool                    opened = false;

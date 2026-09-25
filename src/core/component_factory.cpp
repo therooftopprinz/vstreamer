@@ -39,7 +39,7 @@
 #endif
 
 #ifdef ENABLE_SDL_SINK
-#include "components/sdl_dmks_sink.hpp"
+#include "components/sdl_kmsdrm_sink.hpp"
 #include "components/sdl_sink.hpp"
 #endif
 
@@ -173,9 +173,10 @@ std::unique_ptr<component_sink> component_factory::create_sink(std::string name)
     {
         return std::make_unique<sdl_sink>();
     }
-    if ("sdl_dmks" == name || "sdl_dmks_sink" == name || "dmks" == name || "dmks_sink" == name)
+    if ("sdl_kmsdrm" == name || "sdl_kmsdrm_sink" == name || "kmsdrm_sink" == name ||
+        "sdl_dmks" == name || "sdl_dmks_sink" == name || "dmks" == name || "dmks_sink" == name)
     {
-        return std::make_unique<sdl_dmks_sink>();
+        return std::make_unique<sdl_kmsdrm_sink>();
     }
 #endif
 

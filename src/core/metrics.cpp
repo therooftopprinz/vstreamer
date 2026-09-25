@@ -2,7 +2,6 @@
 
 #include <cinttypes>
 #include <cstdio>
-#include <unordered_map>
 
 namespace vstreamer
 {
@@ -74,6 +73,31 @@ namespace
     return s;
 }
 
+[[nodiscard]] std::string trim_trailing_fraction_zeros(std::string s)
+{
+    const auto dot = s.find('.');
+    if (dot == std::string::npos)
+    {
+        return s;
+    }
+    while (s.size() > dot + 1 && s.back() == '0')
+    {
+        s.pop_back();
+    }
+    if (!s.empty() && s.back() == '.')
+    {
+        s.pop_back();
+    }
+    return s;
+}
+
+[[nodiscard]] std::string format_double_metric(double v)
+{
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%.4f", v);
+    return trim_trailing_fraction_zeros(buf);
+}
+
 [[nodiscard]] std::string format_metric_value(metric &m, const std::string &key)
 {
     std::lock_guard<std::mutex> lock(m.mutex);
@@ -91,14 +115,19 @@ namespace
     }
     if (std::holds_alternative<double>(m.value))
     {
-        char        buf[32];
-        const char *fmt = "%.0f";
+        const double v = std::get<double>(m.value);
+        char         buf[48];
         if (key.size() >= 3 && key.compare(key.size() - 3, 3, "_ms") == 0)
         {
-            fmt = "%.1f";
+            std::snprintf(buf, sizeof(buf), "%.1f", v);
+            return buf;
         }
-        std::snprintf(buf, sizeof(buf), fmt, std::get<double>(m.value));
-        return buf;
+        if (key.size() >= 4 && key.compare(key.size() - 4, 4, "_pct") == 0)
+        {
+            std::snprintf(buf, sizeof(buf), "%.2f", v);
+            return buf;
+        }
+        return format_double_metric(v);
     }
     return strip_trailing_angle_comment(std::get<std::string>(m.value));
 }
@@ -119,16 +148,15 @@ namespace
 
 }  // namespace
 
-std::string metrics::to_string() const
+bool metrics::format_metric(const std::string &name, std::string *out) const
 {
-    std::lock_guard<std::mutex> lock(mu);
-
-    std::unordered_map<std::string, std::vector<std::pair<std::string, std::shared_ptr<metric>>>> by_section;
-    std::vector<std::string> section_order;
-
-    for (const std::string &name : order)
+    if (nullptr == out)
     {
-        std::shared_ptr<metric> ptr;
+        return false;
+    }
+    std::shared_ptr<metric> ptr;
+    {
+        std::lock_guard<std::mutex> lock(mu);
         for (const auto &entry : entries)
         {
             if (entry.first == name)
@@ -137,6 +165,45 @@ std::string metrics::to_string() const
                 break;
             }
         }
+    }
+    if (nullptr == ptr)
+    {
+        return false;
+    }
+    std::string section;
+    std::string key;
+    if (!split_section_key(name, section, key))
+    {
+        key = name;
+    }
+    *out = format_metric_value(*ptr, key);
+    return true;
+}
+
+std::string metrics::to_string() const
+{
+    std::vector<std::pair<std::string, std::shared_ptr<metric>>> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        for (const std::string &name : order)
+        {
+            for (const auto &entry : entries)
+            {
+                if (entry.first == name)
+                {
+                    snapshot.emplace_back(name, entry.second);
+                    break;
+                }
+            }
+        }
+    }
+
+    std::string out;
+    std::string prev_section;
+    for (const auto &item : snapshot)
+    {
+        const std::string &name = item.first;
+        const std::shared_ptr<metric> &ptr = item.second;
         if (nullptr == ptr)
         {
             continue;
@@ -149,40 +216,18 @@ std::string metrics::to_string() const
             continue;
         }
 
-        auto &bucket = by_section[section];
-        if (bucket.empty())
+        if (!out.empty() && section != prev_section && !prev_section.empty())
         {
-            section_order.push_back(section);
+            out += '\n';
         }
-        bucket.emplace_back(key, ptr);
-    }
+        prev_section = section;
 
-    std::string out;
-    for (size_t si = 0; si < section_order.size(); si++)
-    {
-        const std::string &section = section_order[si];
-        out += '[';
         out += section;
-        out += "]\n";
-
-        const auto it = by_section.find(section);
-        if (it == by_section.end())
-        {
-            continue;
-        }
-
-        for (const auto &kv : it->second)
-        {
-            out += kv.first;
-            out += " = ";
-            out += strip_trailing_angle_comment(format_metric_value(*kv.second, kv.first));
-            out += '\n';
-        }
-
-        if (si + 1 < section_order.size())
-        {
-            out += '\n';
-        }
+        out += '.';
+        out += key;
+        out += " = ";
+        out += strip_trailing_angle_comment(format_metric_value(*ptr, key));
+        out += '\n';
     }
 
     return out;

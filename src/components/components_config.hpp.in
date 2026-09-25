@@ -12,7 +12,6 @@
 #cmakedefine ENABLE_SDL_SINK
 #cmakedefine ENABLE_STREAM_SENDER
 #cmakedefine ENABLE_STREAM_RECEIVER
-#cmakedefine ENABLE_ENCODER_CBR_LOGIC
 #cmakedefine ENABLE_RTP_H264_PAY
 #cmakedefine ENABLE_RTP_H264_DEPAY
 

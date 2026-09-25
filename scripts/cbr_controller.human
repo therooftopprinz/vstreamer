@@ -1,0 +1,133 @@
+---- classes ----
+LPF(sample_rate, cutoff, rolloff, order, type) : Low pass filter
+FirBoxcar(length) : uniform FIR, N taps of 1/N; advance only on new telemetry (see loop)
+Delay(n) : Sample delayer
+Integrator(clamp_function, dt) : Integrator; Integrator.max(ceiling) sets dynamic upper bound
+PID(kp, ki, kd, integral_clamp_function, dt, output_clamp_function) : PID; .last is previous (clamped) output
+FecMap(k, gain) : f(loss_rate) = gain*k/(1-loss_rate)
+Clamp(min, max) : Clamper
+RecoveryRate(gain) : f(loss) = gain * g(loss); loss in [0, 1] (FEC loss fraction)
+    g(loss) : a=-1.2879409351927793, b=2.1061760225008777, c=-1.9108519864057192, d=0.09240595335755265; g=a*loss^3+b*loss^2+c*loss+d
+Metrics(host, port, timeout) : Metrics client (UDP `metrics` snapshot)
+PlotWS(url) : PlotJuggler WS client (empty url = off); series keys cbr/<name>
+Console(host, port, timeout) : UDP console commands to pipeline
+TuneConsole(host, port, handle) : local UDP tune console; handle(line)->reply; poll() each loop
+Args : CLI arguments — a.default("key", value) then a("key")
+
+Init:
+    a = Args(sys.argv)
+    a.default("plot-url", "")
+    a.default("host", "127.0.0.1")
+    a.default("port", 5090)
+    a.default("timeout", 2.5)
+    a.default("udp-loss-filter-cutoff", 0.1)
+    a.default("udp-loss-steady-fir-length", 128)
+    a.default("udp-loss-steady-min-packets", 8)
+    a.default("fec-loss-filter-cutoff", 0.1)
+    a.default("encode-rate-filter-cutoff", 0.1)
+    a.default("cbr-rate-filter-cutoff", 0.1)
+    a.default("k", 6)
+    a.default("n-gain", 1.2)
+    a.default("n-max", 15)
+    a.default("kp", 1.0)
+    a.default("kd", 0.005)
+    a.default("ki", 0.01)
+    a.default("recover-rate", 1.1)
+    a.default("cbr-min", 100)
+    a.default("cbr-max", 20000)
+    a.default("loop-rate", 10.0)
+    a.default("run-seconds", 0.0)
+    a.default("tune-host", "127.0.0.1")
+    a.default("tune-port", 5092)
+
+    loop_rate = a("loop-rate")
+    dt = 1 / loop_rate
+
+    plot = PlotWS(a("plot-url"))
+    metric = Metrics(a("host"), a("port"), a("timeout"))
+    console = Console(a("host"), a("port"), a("timeout"))
+    lpf_udp_loss = LPF(loop_rate, a("udp-loss-filter-cutoff"))
+    fir_udp_loss_steady = FirBoxcar(a("udp-loss-steady-fir-length"))
+    lpf_fec_loss = LPF(loop_rate, a("fec-loss-filter-cutoff"))
+    lpf_encode_rate = LPF(loop_rate, a("encode-rate-filter-cutoff"))
+    lpf_cbr = LPF(loop_rate, a("cbr-rate-filter-cutoff"))
+    fec_map = FecMap(a("k"), a("n-gain"))
+    fec_clamp = Clamp(a("k"), a("n-max"))
+    cbr_clamp = Clamp(a("cbr-min"), a("cbr-max"))
+    cbr_pid = PID(a("kp"), a("ki"), a("kd"), cbr_clamp, dt, cbr_clamp)
+    recover_rate_box = [a("recover-rate")]
+    tune = TuneConsole(a("tune-host"), a("tune-port"), tune_handler)
+    udp_received_delta = Delay(1)
+    fec_received_delta = Delay(1)
+    udp_gap_delta = Delay(1)
+    fec_gap_delta = Delay(1)
+    encode_delta = Delay(1)
+    steady_min_pkts = a("udp-loss-steady-min-packets")
+    session_gap0 = null
+    session_recv0 = null
+
+    console.line("set_fec_k {k}")
+
+Loop:
+    tune.poll()
+    metric.refresh()
+    now_ = now()
+    udp_received_delta_ = udp_received_delta(metric("stream_sender.peer_udp_packet_received"))
+    fec_received_delta_ = fec_received_delta(metric("stream_sender.peer_fec_packet_received"))
+    udp_gap_delta_ = udp_gap_delta(metric("stream_sender.peer_udp_gap_count"))
+    fec_gap_delta_ = fec_gap_delta(metric("stream_sender.peer_fec_gap_count"))
+    encode_delta_ = encode_delta(metric("h264_encoder.out_bytes"))
+    udp_total_ = udp_gap_delta_ + udp_received_delta_
+    fec_total_ = fec_gap_delta_ + fec_received_delta_
+    loss_udp_raw_ = udp_gap_delta_ / udp_total_ if udp_total_ else 0.0
+    loss_fec_raw_ = fec_gap_delta_ / fec_total_ if fec_total_ else 0.0
+    loss_udp_ = lpf_udp_loss(loss_udp_raw_)
+    loss_fec_ = lpf_fec_loss(loss_fec_raw_)
+    encode_rate_ = lpf_encode_rate(encode_delta_ / dt * 8 / 1000)
+
+    plot("loss_udp", now_, loss_udp_)
+    plot("loss_fec", now_, loss_fec_)
+    plot("encode_rate", now_, encode_rate_)
+
+    # calculate fec_n (session loss since controller baseline + zero-padded FIR; one tap per counter update)
+    udp_gap_abs_ = metric("stream_sender.peer_udp_gap_count")
+    udp_recv_abs_ = metric("stream_sender.peer_udp_packet_received")
+    loss_udp_session_ = null
+    if udp_gap_abs_ is not null and udp_recv_abs_ is not null:
+        if session_gap0 is null and (udp_gap_abs_ + udp_recv_abs_) >= steady_min_pkts:
+            session_gap0 = udp_gap_abs_
+            session_recv0 = udp_recv_abs_
+        if session_gap0 is not null:
+            dg_ = udp_gap_abs_ - session_gap0
+            dr_ = udp_recv_abs_ - session_recv0
+            session_denom_ = dg_ + dr_
+            if session_denom_ >= steady_min_pkts:
+                loss_udp_session_ = dg_ / session_denom_
+    if udp_total_ > 0 and loss_udp_session_ is not null:
+        loss_udp_steady_state_ = fir_udp_loss_steady(loss_udp_session_)
+    else:
+        loss_udp_steady_state_ = fir_udp_loss_steady.value
+    plot("loss_udp_steady_state", loss_udp_steady_state_)
+    fec_n_preclamp_ = fec_map(loss_udp_steady_state_)
+    fec_n_ = fec_clamp(fec_n_preclamp_)
+    plot("fec_n", fec_n_)
+
+    # calculate cbr
+    if loss_fec_ > 0:
+        cbr_setpoint_ = encode_rate_ * (1 - loss_fec_)
+    else:
+        cbr_setpoint_ = encode_rate_ * recover_rate_box[0]
+    cbr_error_ = cbr_setpoint_ - cbr_pid.last
+    cbr_ = cbr_pid(cbr_error_)
+    plot("cbr_error", cbr_error_)
+    plot("cbr_setpoint", cbr_setpoint_)
+    plot("cbr", cbr_)
+    plot("kp", cbr_pid.kp)
+    plot("ki", cbr_pid.ki)
+    plot("kd", cbr_pid.kd)
+    plot("recover_rate", recover_rate_box[0])
+
+    plot.flush()
+
+    console("set_fec_n", fec_n_)
+    console("set_encode_cbr", cbr_)

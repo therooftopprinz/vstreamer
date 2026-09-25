@@ -36,7 +36,7 @@
 #endif
 
 #ifdef ENABLE_SDL_SINK
-#include "components/sdl_dmks_sink.hpp"
+#include "components/sdl_kmsdrm_sink.hpp"
 #include "components/sdl_sink.hpp"
 #endif
 
@@ -46,10 +46,6 @@
 
 #ifdef ENABLE_STREAM_RECEIVER
 #include "components/stream_receiver.hpp"
-#endif
-
-#ifdef ENABLE_ENCODER_CBR_LOGIC
-#include "components/encoder_cbr_logic.hpp"
 #endif
 
 #ifdef ENABLE_RTP_H264_PAY

@@ -82,7 +82,7 @@ private:
     int fps = 30;
     int qp = 36;
     int gop = 30;
-    /* Target wire bitrate (bit/s); metrics h264_encoder.cbr. Honored by MPP when rc_mpp_cbr. */
+    /* Target wire bitrate (bit/s); metrics h264_encoder.cbr_kbps. Honored by MPP when rc_mpp_cbr. */
     int  bps_target = 20'000'000;
     bool rc_mpp_cbr = false;
 

@@ -11,19 +11,17 @@ flowchart LR
   enc[h264_encoder]
   pay[rtp_h264_pay]
   snd[stream_sender]
-  cbr[encoder_cbr_logic]
   v4l2 --> jdec --> enc --> pay --> snd
-  snd -->|".1 telemetry"| cbr
-  cbr -->|configure qp| enc
 ```
 
 | Link | Kind |
 |------|------|
 | … → `stream_sender.0` | `SOCK` (RTP datagrams) |
-| `stream_sender.1` → `encoder_cbr_logic` | `stream_telemetry` (not `data_packet`) |
 
-`stream_sender` implements `component_stream_telemetry` on pad 1. The core polls
-`telemetry_snapshot()` and calls `encoder_cbr_logic::apply()`.
+Reverse-path RX/gap metrics are not on the media graph. Bench apps poll
+`stream_receiver`, push counters to `stream_sender::set_receiver_counters()`, and read
+`peer_*` via `stream_sender::query()`; encoder rate is set via
+`configure("cbr")` or the channel UDP console (`set_encode_cbr`).
 
 Factory names: `v4l2_source`, `jpeg_decoder_multicore`, `h264_encoder_cedar`,
 `rtp_h264_pay`, `stream_sender`.
@@ -45,7 +43,7 @@ flowchart LR
 | decoder → `sdl_sink` | `FRAME` / NV12 |
 
 Factory names: `stream_receiver`, `rtp_h264_depay`, `h264_decoder_mpp`, `sdl_sink`
-(`display`), `sdl_dmks_sink` (`dmks`, SDL `kmsdrm` on DRM/KMS). Build with
+(`display`), `sdl_kmsdrm_sink` (SDL `kmsdrm` on DRM/KMS). Build with
 `-DENABLE_SDL_SINK=ON` (requires SDL2).
 
 ## Legacy aliases

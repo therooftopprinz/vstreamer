@@ -1,9 +1,9 @@
-#ifndef VSTREAMER_COMPONENTS_SDL_DMKS_SINK_HPP
-#define VSTREAMER_COMPONENTS_SDL_DMKS_SINK_HPP
+#ifndef VSTREAMER_COMPONENTS_SDL_KMSDRM_SINK_HPP
+#define VSTREAMER_COMPONENTS_SDL_KMSDRM_SINK_HPP
 
 #include "components/components_config.hpp"
 #ifndef ENABLE_SDL_SINK
-#error "sdl_dmks_sink requires -DENABLE_SDL_SINK=ON"
+#error "sdl_kmsdrm_sink requires -DENABLE_SDL_SINK=ON"
 #endif
 
 #include <cstdint>
@@ -19,14 +19,14 @@ namespace vstreamer
 {
 
 /* NV12 preview via SDL kmsdrm (headless / DRM connector, no X11). */
-class sdl_dmks_sink : public component_sink
+class sdl_kmsdrm_sink : public component_sink
 {
 public:
-    sdl_dmks_sink();
-    ~sdl_dmks_sink() override;
+    sdl_kmsdrm_sink();
+    ~sdl_kmsdrm_sink() override;
 
-    sdl_dmks_sink(const sdl_dmks_sink &) = delete;
-    sdl_dmks_sink &operator=(const sdl_dmks_sink &) = delete;
+    sdl_kmsdrm_sink(const sdl_kmsdrm_sink &) = delete;
+    sdl_kmsdrm_sink &operator=(const sdl_kmsdrm_sink &) = delete;
 
     [[nodiscard]] std::string name() const override;
     [[nodiscard]] media_kind_e input_kind() const override;
@@ -50,11 +50,11 @@ private:
     bool opened = false;
     uint64_t frames_in = 0;
 
-    sdl_nv12_presenter present {"sdl_dmks_sink", "kmsdrm"};
+    sdl_nv12_presenter present {"sdl_kmsdrm_sink", "kmsdrm"};
 
     mutable std::string query_buf;
 };
 
 }  // namespace vstreamer
 
-#endif  // VSTREAMER_COMPONENTS_SDL_DMKS_SINK_HPP
+#endif  // VSTREAMER_COMPONENTS_SDL_KMSDRM_SINK_HPP

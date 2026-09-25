@@ -133,6 +133,12 @@ int jpeg_decoder_multicore::decode_one(void *dec_v, void *avframe_v, void *pkt_v
         return -EIO;
     }
 
+    {
+        const char *pix_name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(avf->format));
+        std::lock_guard<std::mutex> lock(cfg_mu);
+        decoded_pix_fmt = (nullptr != pix_name && pix_name[0] != '\0') ? pix_name : "unknown";
+    }
+
     size_t nv12_sz = static_cast<size_t>(dw) * static_cast<size_t>(dh) * 3ULL / 2ULL;
     auto  *buf = static_cast<uint8_t *>(std::malloc(nv12_sz));
     if (nullptr == buf)
@@ -650,6 +656,12 @@ int jpeg_decoder_multicore::query(std::string_view key, std::string_view *value)
     if (key == "output_mode")
     {
         query_buf = output_mode_name(output_mode);
+        *value = query_buf;
+        return 0;
+    }
+    if (key == "decoded_pix_fmt")
+    {
+        query_buf = decoded_pix_fmt;
         *value = query_buf;
         return 0;
     }
